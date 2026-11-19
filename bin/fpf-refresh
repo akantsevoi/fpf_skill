@@ -2,12 +2,14 @@
 """Explicitly refresh the pinned FPF publication snapshot and its indexes.
 
 Usage: python3 bin/fpf-refresh [--source PATH] [--allow-dirty]
+The source checkout comes from --source or the FPF_SOURCE environment variable.
 The source is never fetched or changed. A clean checkout is required by default.
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,7 +18,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parent.parent
-DEFAULT_SOURCE = Path("/Users/ak/src/github.com/ailev/FPF")
 ROOT_FILES = {
     "FPF-Spec.md", "FPF-LIBRARY-REFERENCE.md", "Readme.md", "USING-FPF.md", "LICENSE", "LICENSING.md",
     "Narrativization-and-Narrative-Studies-Principles-Framework.md",
@@ -28,11 +29,25 @@ def git(source, *args):
     return subprocess.check_output(["git", "-C", str(source), *args])
 
 
+def public_origin(source):
+    """Return the upstream URL without credentials, or a neutral label; never a local path."""
+    try:
+        url = git(source, "remote", "get-url", "origin").decode().strip()
+    except subprocess.CalledProcessError:
+        return "local checkout"
+    url = re.sub(r"^[a-z+]+://[^@/]*@", "https://", url)
+    url = re.sub(r"^[^@/:]+@([^:]+):", r"https://\1/", url)
+    return url.removesuffix(".git")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--source", type=Path, default=os.environ.get("FPF_SOURCE"))
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args()
+    if not args.source:
+        parser.error("set --source PATH or FPF_SOURCE to a local FPF checkout")
+    args.source = Path(args.source)
     source = args.source.expanduser().resolve()
     if not (source / "FPF-Spec.md").is_file() or not (source / "USING-FPF.md").is_file():
         parser.error(f"not an FPF publication checkout: {source}")
@@ -65,7 +80,7 @@ def main():
             ):
                 raise RuntimeError("domain publications missing; keeping previous snapshot")
         metadata = {
-            "source": str(source),
+            "source": public_origin(source),
             "revision": revision,
             "dirty": dirty,
             "refreshed_at_utc": datetime.now(timezone.utc).isoformat(),

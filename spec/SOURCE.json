@@ -1,8 +1,8 @@
 {
-  "source": "/Users/ak/src/github.com/ailev/FPF",
+  "source": "https://github.com/ailev/FPF",
   "revision": "9fb0bff7ac2dfe82f068b03befe6b7303bcd7f5b",
   "dirty": false,
-  "refreshed_at_utc": "2026-11-19T08:11:41.071543+00:00",
+  "refreshed_at_utc": "2026-11-19T08:26:30.218674+00:00",
   "files": {
     "DPFs/DECISION-DESIGN-PRINCIPLES-FRAMEWORK.md": "7d36b804f53e27d4c6f9f39d9c518e978e8c71f525df389ac04c13d16beeb0ef",
     "DPFs/DEFENSE-AND-TRANSMISSION-MODELING-DPF.md": "2433b25aed52690c9c303fde731196d49dffe3a5a66027c8051867c51a103470",

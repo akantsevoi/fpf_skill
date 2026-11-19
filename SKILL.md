@@ -12,7 +12,7 @@ FPF Library supplies connected methods for engineering, research, learning, mana
 ## Retrieval
 
 ```
-SKILL=/Users/ak/.agents/skills/fpf
+SKILL=<this skill's base directory>
 
 $SKILL/bin/fpf cards                 # current Core entries and cards, never a hard-coded list
 $SKILL/bin/fpf get SOTA-PORTFOLIO    # one Core entry or card
@@ -84,6 +84,6 @@ The current Core entries are generated from the edition with `fpf cards`; Suite 
 
 ## Refreshing the pinned snapshot
 
-Only on an explicit request to update the skill, run `python3 /Users/ak/.agents/skills/fpf/bin/fpf-refresh`. It reads the clean local checkout at `/Users/ak/src/github.com/ailev/FPF`; it never pulls from the network. `--source PATH` selects another checkout, and `--allow-dirty` deliberately snapshots uncommitted files (recorded as dirty). It copies the tracked public publications, writes source revision and file hashes to `spec/SOURCE.json`, rebuilds the Core and ecosystem heading indexes in staging, and replaces the snapshot only after indexing succeeds. Do not manually copy only Core; its DPF dependencies and `USING-FPF.md` must travel with it.
+Only on an explicit request to update the skill, run `python3 $SKILL/bin/fpf-refresh --source PATH` (or set `FPF_SOURCE`). PATH is a clean local checkout of `https://github.com/ailev/FPF`; ask the user for it if neither is given. It never pulls from the network, and `--allow-dirty` deliberately snapshots uncommitted files (recorded as dirty). It copies the tracked public publications, writes source revision and file hashes to `spec/SOURCE.json`, rebuilds the Core and ecosystem heading indexes in staging, and replaces the snapshot only after indexing succeeds. Do not manually copy only Core; its DPF dependencies and `USING-FPF.md` must travel with it.
 
 After a refresh, run `fpf cards`, `fpf locate` and `fpf pattern` on representative Core, engineering, management, human-capability, foundational and narrative questions. Verify that `DPFs/`, all four Suites, standalone frameworks and the Library Reference were copied. Compare the changed READMEs, entry/card set and named routes with this SKILL.md. Repair stale routing prose or tool assumptions; an index rebuild does not validate semantic changes. If the source checkout moves or is unavailable, ordinary work still uses the pinned snapshot. A question that explicitly requires newer upstream guidance needs an accessible newer edition or an honest freshness limit.
