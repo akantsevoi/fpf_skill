@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Explicitly refresh the pinned FPF publication snapshot and its indexes.
+
+Usage: python3 bin/fpf-refresh [--source PATH] [--allow-dirty]
+The source is never fetched or changed. A clean checkout is required by default.
+"""
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+SKILL = Path(__file__).resolve().parent.parent
+DEFAULT_SOURCE = Path("/Users/ak/src/github.com/ailev/FPF")
+ROOT_FILES = {
+    "FPF-Spec.md", "FPF-LIBRARY-REFERENCE.md", "Readme.md", "USING-FPF.md", "LICENSE", "LICENSING.md",
+    "Narrativization-and-Narrative-Studies-Principles-Framework.md",
+}
+PUBLICATION_DIRS = ("DPFs/", "Engineering DPF Suite/", "Foundational Thinking DPF Suite/")
+
+
+def git(source, *args):
+    return subprocess.check_output(["git", "-C", str(source), *args])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
+    parser.add_argument("--allow-dirty", action="store_true")
+    args = parser.parse_args()
+    source = args.source.expanduser().resolve()
+    if not (source / "FPF-Spec.md").is_file() or not (source / "USING-FPF.md").is_file():
+        parser.error(f"not an FPF publication checkout: {source}")
+    revision = git(source, "rev-parse", "HEAD").decode().strip()
+    dirty = bool(git(source, "status", "--porcelain"))
+    if dirty and not args.allow_dirty:
+        parser.error("source checkout has changes; commit them or use --allow-dirty")
+    tracked = [Path(p.decode()) for p in git(source, "ls-files", "-z").split(b"\0") if p]
+    selected = [p for p in tracked if str(p) in ROOT_FILES or str(p).startswith(PUBLICATION_DIRS)]
+    if not selected:
+        parser.error("no tracked FPF publications found")
+
+    staged = Path(tempfile.mkdtemp(prefix=".fpf-stage-", dir=SKILL))
+    backup = SKILL / ".fpf-previous"
+    current = SKILL / "spec"
+    try:
+        hashes = {}
+        for relative in selected:
+            original = source / relative
+            if not original.is_file() or original.is_symlink():
+                parser.error(f"missing or linked publication: {original}")
+            target = staged / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(original, target)
+            hashes[str(relative)] = hashlib.sha256(target.read_bytes()).hexdigest()
+        if (source / "DPFs").is_dir():
+            if not (staged / "DPFs" / "README.md").is_file() or not any(
+                p.name.endswith("FRAMEWORK.md") or p.name.endswith("DPF.md")
+                for p in (staged / "DPFs").rglob("*.md")
+            ):
+                raise RuntimeError("domain publications missing; keeping previous snapshot")
+        metadata = {
+            "source": str(source),
+            "revision": revision,
+            "dirty": dirty,
+            "refreshed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "files": hashes,
+        }
+        (staged / "SOURCE.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        (staged / "VERSION").write_text(revision[:12] + (" (dirty)" if dirty else "") + "\n")
+        subprocess.run([sys.executable, str(SKILL / "bin" / "fpf-reindex"), str(staged)], check=True)
+        if not (staged / "index.tsv").stat().st_size or not (staged / "catalog.tsv").stat().st_size:
+            raise RuntimeError("empty index; keeping previous snapshot")
+        if backup.exists():
+            raise RuntimeError(f"previous backup still exists: {backup}; inspect it first")
+        if current.exists():
+            os.replace(current, backup)
+        try:
+            os.replace(staged, current)
+        except Exception:
+            if backup.exists():
+                os.replace(backup, current)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+        print(f"snapshot {revision[:12]} ({len(selected)} files) from {source}")
+        print("Review 'bin/fpf cards' and the publication READMEs for changed routing guidance.")
+    finally:
+        if staged.exists():
+            shutil.rmtree(staged)
+
+
+if __name__ == "__main__":
+    main()

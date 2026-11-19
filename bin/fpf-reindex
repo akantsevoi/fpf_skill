@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Rebuild Core index.tsv and ecosystem catalog.tsv from a snapshot directory.
+
+Run after dropping in a new FPF edition. Emits one row per heading (levels 1-4):
+
+    id <TAB> level <TAB> startLine <TAB> endLine <TAB> bytes <TAB> title
+"""
+import re
+import sys
+from pathlib import Path
+
+SKILL = Path(__file__).resolve().parent.parent
+ROOT = Path(sys.argv[1]) if len(sys.argv) > 1 else SKILL / "spec"
+SPEC = ROOT / "FPF-Spec.md"
+INDEX = ROOT / "index.tsv"
+CATALOG = ROOT / "catalog.tsv"
+
+# " - ", " — ", " – ", " -- " all appear as ID/title separators in the corpus.
+SEP = re.compile(r"\s+(?:-{1,2}|—|–)\s+")
+# A pattern ID looks like A.19.ECS, E.10:4, C.2.1, G.Core, F.0.1, A.2.8.PER.
+IDLIKE = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:[.:][A-Za-z0-9-]+)+$")
+# A card key looks like ARCHITECTURE, WORKING-DOCUMENTS, DPF-AUTHORING.
+KEYLIKE = re.compile(r"^[A-Z][A-Z0-9-]{2,}$")
+
+
+def slug(text, limit=48):
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return s[:limit].rstrip("-")
+
+
+def heading_id(title):
+    """Return (id, title) for a heading body, preferring an explicit pattern ID."""
+    clean = title.strip().strip("*").replace("`", "").strip()
+    head = SEP.split(clean, 1)[0].strip().strip("*").strip()
+    if IDLIKE.match(head) or KEYLIKE.match(head):
+        return head, clean
+    return slug(clean), clean
+
+
+def index_file(path):
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    # Pass 1: collect headings with their level and byte offset.
+    heads = []
+    offset = 0
+    offsets = []
+    for i, line in enumerate(lines):
+        offsets.append(offset)
+        offset += len(line.encode("utf-8"))
+        m = re.match(r"^(#{1,4}) +(\S.*)$", line)
+        if m:
+            heads.append((i, len(m.group(1)), m.group(2)))
+    offsets.append(offset)  # sentinel: total size
+
+    # Pass 2: a section ends where the next heading of equal-or-shallower level starts.
+    rows = []
+    seen = {}
+    for n, (idx, level, title) in enumerate(heads):
+        end = len(lines) - 1
+        for j in range(n + 1, len(heads)):
+            if heads[j][1] <= level:
+                end = heads[j][0] - 1
+                break
+        ident, clean = heading_id(title)
+        if ident in seen:
+            seen[ident] += 1
+            ident = f"{ident}#{seen[ident]}"
+        else:
+            seen[ident] = 1
+        nbytes = offsets[end + 1] - offsets[idx]
+        rows.append((ident, level, idx + 1, end + 1, nbytes, clean))
+
+    return rows
+
+
+def main():
+    if not SPEC.exists():
+        sys.exit(f"missing spec: {SPEC}")
+    core = index_file(SPEC)
+    with INDEX.open("w", encoding="utf-8") as fh:
+        for r in core:
+            fh.write("\t".join(str(x) for x in r) + "\n")
+
+    catalog = []
+    for path in sorted(ROOT.rglob("*.md")):
+        if path.name in ("Readme.md", "README.md", "USING-FPF.md", "LICENSING.md") or "REFERENCE" in path.name:
+            continue
+        for ident, level, start, end, nbytes, title in index_file(path):
+            if level == 2 and (path == SPEC or ident != "practical-entries"):
+                catalog.append((str(path.relative_to(ROOT)), ident, start, end, nbytes, title))
+    with CATALOG.open("w", encoding="utf-8") as fh:
+        for row in catalog:
+            fh.write("\t".join(str(x) for x in row) + "\n")
+    print(f"indexed {len(core)} Core headings and {len(catalog)} ecosystem sections")
+
+
+if __name__ == "__main__":
+    main()

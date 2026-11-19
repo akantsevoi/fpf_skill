@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Retrieval CLI over the FPF monolith. Never loads the whole spec into context.
+
+    fpf toc [FILTER]        list level-2 pattern sections (ID, size, title)
+    fpf outline ID          list a section's subsection IDs and sizes
+    fpf get ID [ID...]      print section bodies (auto-outlines oversized ones)
+    fpf get ID --full       force full body regardless of size
+    fpf search REGEX        grep the spec; report owning pattern ID per hit
+    fpf cards               list the practical entries (ordinary entries + cards)
+    fpf entries             alias for `fpf cards`
+    fpf prompt              print the spec's canonical first prompt
+    fpf files               list the snapshotted publications
+    fpf locate QUERY        find headings across Core and DPFs
+    fpf search-all REGEX    search all snapshotted publications (40 hits by default)
+    fpf pattern ID          retrieve a DPF pattern by ID (or outline if large)
+    fpf pattern ID --solution  retrieve only its Solution section
+"""
+import re
+import sys
+from pathlib import Path
+
+SKILL = Path(__file__).resolve().parent.parent
+SPEC = SKILL / "spec" / "FPF-Spec.md"
+INDEX = SKILL / "spec" / "index.tsv"
+CATALOG = SKILL / "spec" / "catalog.tsv"
+BIG = 50_000  # bytes; ~12k tokens. Above this, outline instead of dumping.
+# " - ", " -- ", " — ", " – " all appear as key/title separators in the corpus.
+SEP = re.compile(r"\s+(?:-{1,2}|—|–)\s+")
+# An entry key looks like NAMING, WORKING-DOCUMENTS, LIVE-WORK-STEERING.
+KEYLIKE = re.compile(r"^[A-Z][A-Z0-9-]{2,}$")
+
+
+def load_index():
+    if not INDEX.exists():
+        sys.exit("index.tsv missing - run bin/fpf-reindex")
+    rows = []
+    for line in INDEX.read_text(encoding="utf-8").splitlines():
+        ident, level, start, end, nbytes, title = line.split("\t")
+        rows.append(
+            {
+                "id": ident,
+                "level": int(level),
+                "start": int(start),
+                "end": int(end),
+                "bytes": int(nbytes),
+                "title": title,
+            }
+        )
+    return rows
+
+
+def lookup(rows, ident):
+    for r in rows:
+        if r["id"].lower() == ident.lower():
+            return r
+    return None
+
+
+def read_lines(start, end):
+    out = []
+    with SPEC.open(encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            if n > end:
+                break
+            if n >= start:
+                out.append(line)
+    return out
+
+
+def kb(n):
+    return f"{n / 1024:.0f}K"
+
+
+def children(rows, sec):
+    return [
+        r
+        for r in rows
+        if r["level"] == sec["level"] + 1 and sec["start"] < r["start"] <= sec["end"]
+    ]
+
+
+def owner(rows, line_no):
+    """Innermost level-2 section containing a line."""
+    for r in rows:
+        if r["level"] == 2 and r["start"] <= line_no <= r["end"]:
+            return r["id"]
+    return "-"
+
+
+def cmd_toc(rows, args):
+    filt = args[0].lower() if args else None
+    for r in rows:
+        if r["level"] != 2:
+            continue
+        hay = (r["id"] + " " + r["title"]).lower()
+        if filt and filt not in hay:
+            continue
+        print(f"{r['id']:<28} {kb(r['bytes']):>6}  {r['title']}")
+
+
+def cmd_outline(rows, args):
+    if not args:
+        sys.exit("usage: fpf outline ID")
+    sec = lookup(rows, args[0])
+    if not sec:
+        sys.exit(f"unknown id: {args[0]} (try: fpf toc {args[0]})")
+    print(f"{sec['id']}  {kb(sec['bytes'])}  {sec['title']}  [L{sec['start']}-{sec['end']}]")
+    for c in children(rows, sec):
+        print(f"  {c['id']:<26} {kb(c['bytes']):>6}  {c['title']}")
+
+
+def cmd_get(rows, args):
+    full = "--full" in args
+    ids = [a for a in args if not a.startswith("--")]
+    if not ids:
+        sys.exit("usage: fpf get ID [ID...] [--full]")
+    for ident in ids:
+        sec = lookup(rows, ident)
+        if not sec:
+            print(f"# unknown id: {ident} (try: fpf toc {ident})\n", file=sys.stderr)
+            continue
+        if sec["bytes"] > BIG and not full:
+            kids = children(rows, sec)
+            print(f"## {sec['title']}")
+            print(
+                f"\n[{kb(sec['bytes'])} - too large to dump. "
+                f"Fetch a subsection, or re-run with --full.]\n"
+            )
+            for c in kids:
+                print(f"  {c['id']:<26} {kb(c['bytes']):>6}  {c['title']}")
+            print()
+            continue
+        sys.stdout.write("".join(read_lines(sec["start"], sec["end"])))
+        print()
+
+
+def cmd_search(rows, args):
+    if not args:
+        sys.exit("usage: fpf search REGEX [-n MAX]")
+    limit = 40
+    if "-n" in args:
+        i = args.index("-n")
+        limit = int(args[i + 1])
+        args = args[:i] + args[i + 2 :]
+    pat = re.compile(args[0], re.IGNORECASE)
+    hits = 0
+    with SPEC.open(encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            m = pat.search(line)
+            if not m:
+                continue
+            hits += 1
+            if hits > limit:
+                print(f"... more hits suppressed (limit {limit}; raise with -n)")
+                return
+            lo = max(0, m.start() - 60)
+            snip = line[lo : m.end() + 90].strip().replace("\t", " ")
+            print(f"{owner(rows, n):<24} L{n:<6} …{snip}…")
+    if hits == 0:
+        print("no hits")
+
+
+def gloss(title):
+    """Drop a leading entry key from a heading title."""
+    parts = SEP.split(title.strip(), 1)
+    if len(parts) == 2 and KEYLIKE.match(parts[0].strip()):
+        return parts[1].strip()
+    return title.strip()
+
+
+def print_entries(rows, sec):
+    for c in children(rows, sec):
+        if not KEYLIKE.match(c["id"]):
+            continue
+        print(f"  {c['id']:<24} {gloss(c['title'])}")
+
+
+def cmd_cards(rows, args):
+    if args:
+        return cmd_get(rows, args)
+    top = lookup(rows, "practical-entries")
+    if not top:  # pre-2026-08-26 editions: cards were the only tier
+        top = lookup(rows, "practical-use-cards")
+        if not top:
+            sys.exit("no practical-entries section in this edition - run bin/fpf-reindex")
+        print_entries(rows, top)
+        return
+    print("Ordinary entries - one direct pattern usually answers these:")
+    print_entries(rows, top)
+    cards = None
+    for c in children(rows, top):
+        if c["id"].startswith("practical-use-cards"):
+            cards = c
+            break
+    if cards:
+        print("\nPractical-use cards - the answer draws on several pattern contributions:")
+        print_entries(rows, cards)
+
+
+def cmd_prompt(rows, args):
+    sec = lookup(rows, "how-to-use-this-repository")
+    body = "".join(read_lines(sec["start"], sec["end"]))
+    blocks = re.findall(r"```text\n(.*?)```", body, re.S)
+    print(blocks[0] if blocks else body)
+
+
+def load_catalog():
+    if not CATALOG.exists():
+        sys.exit("catalog.tsv missing - run bin/fpf-refresh")
+    entries = []
+    for line in CATALOG.read_text(encoding="utf-8").splitlines():
+        path, ident, start, end, nbytes, title = line.split("\t", 5)
+        entries.append((path, ident, int(start), int(end), int(nbytes), title))
+    return entries
+
+
+def cmd_files(rows, args):
+    for path in sorted((SKILL / "spec").rglob("*.md")):
+        print(path.relative_to(SKILL / "spec"))
+
+
+def cmd_locate(rows, args):
+    if not args:
+        sys.exit("usage: fpf locate QUERY")
+    query = " ".join(args).casefold()
+    for path, ident, start, end, nbytes, title in load_catalog():
+        if query in (ident + " " + title + " " + path).casefold():
+            print(f"{ident:<25} {path}:{start}  {title}")
+
+
+def cmd_search_all(rows, args):
+    if not args:
+        sys.exit("usage: fpf search-all REGEX [-n MAX]")
+    limit = 40
+    if "-n" in args:
+        i = args.index("-n")
+        limit = int(args[i + 1])
+        args = args[:i] + args[i + 2:]
+    pat = re.compile(args[0], re.IGNORECASE)
+    hits = 0
+    for file in sorted((SKILL / "spec").rglob("*.md")):
+        path = file.relative_to(SKILL / "spec")
+        with file.open(encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                match = pat.search(line)
+                if not match:
+                    continue
+                hits += 1
+                if hits > limit:
+                    print(f"... more hits suppressed (limit {limit}; raise with -n)")
+                    return
+                print(f"{path}:{n}  {line.strip()[:220]}")
+    if not hits:
+        print("no hits")
+
+
+def cmd_pattern(rows, args):
+    if not args:
+        sys.exit("usage: fpf pattern ID")
+    solution = "--solution" in args
+    matches = [r for r in load_catalog() if r[1].casefold() == args[0].casefold()]
+    if not matches:
+        sys.exit(f"unknown DPF pattern: {args[0]} (try: fpf locate {args[0]})")
+    if len(matches) > 1:
+        sys.exit("ambiguous ID; use fpf locate to choose its publication")
+    path, ident, start, end, nbytes, title = matches[0]
+    print(f"# {path}:{start}-{end} ({ident})")
+    if nbytes > BIG and not solution:
+        print(f"[{kb(nbytes)} - too large to dump; read the relevant lines from this file.]")
+        return
+    found = False
+    with (SKILL / "spec" / path).open(encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            if n > end:
+                break
+            if n < start:
+                continue
+            if solution:
+                if line.startswith(f"### {ident}:4 "):
+                    found = True
+                elif found and line.startswith("### "):
+                    break
+            if not solution or found:
+                sys.stdout.write(line)
+    if solution and not found:
+        sys.exit(f"no :4 Solution section found in {ident}; read its pattern body")
+
+
+COMMANDS = {
+    "toc": cmd_toc,
+    "outline": cmd_outline,
+    "get": cmd_get,
+    "search": cmd_search,
+    "cards": cmd_cards,
+    "entries": cmd_cards,
+    "prompt": cmd_prompt,
+    "files": cmd_files,
+    "locate": cmd_locate,
+    "search-all": cmd_search_all,
+    "pattern": cmd_pattern,
+}
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd = sys.argv[1]
+    if cmd not in COMMANDS:
+        sys.exit(f"unknown command: {cmd}\n{__doc__}")
+    COMMANDS[cmd](load_index(), sys.argv[2:])
+
+
+if __name__ == "__main__":
+    main()
